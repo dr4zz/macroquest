@@ -138,6 +138,8 @@ public:
 	const std::string& GetLuaDir() const { return m_luaEnvironmentSettings->luaDir; }
 	const std::string& GetModuleDir() const { return m_luaEnvironmentSettings->moduleDir; }
 
+	const sol::object CopyObject(sol::object) const;
+
 	static std::string GetScriptPath(std::string_view script, const std::filesystem::path& luaDir);
 	static std::string GetCanonicalScriptName(std::string_view script, const std::filesystem::path& luaDir);
 	void UpdateLuaDir(const std::filesystem::path& newLuaDir);

@@ -130,6 +130,7 @@
     <ClCompile Include="bindings\lua_ImGuiUserTypes.cpp" />
     <ClCompile Include="bindings\lua_MQBindings.cpp" />
     <ClCompile Include="bindings\lua_MQMacroData.cpp" />
+    <ClCompile Include="LuaActor.cpp" />
     <ClCompile Include="LuaCoroutine.cpp" />
     <ClCompile Include="LuaEvent.cpp" />
     <ClCompile Include="LuaImGui.cpp">
@@ -152,6 +153,7 @@
   <ItemGroup>
     <ClInclude Include="bindings\lua_Bindings.h" />
     <ClInclude Include="bindings\lua_MQBindings.h" />
+    <ClInclude Include="LuaActor.h" />
     <ClInclude Include="LuaCommon.h" />
     <ClInclude Include="LuaEvent.h" />
     <ClInclude Include="LuaCoroutine.h" />

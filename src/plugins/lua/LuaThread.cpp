@@ -17,7 +17,9 @@
 #include "LuaCoroutine.h"
 #include "LuaEvent.h"
 #include "LuaImGui.h"
+#include "LuaActor.h"
 #include "bindings/lua_Bindings.h"
+#include "bindings/lua_MQBindings.h"
 
 #include <mq/Plugin.h>
 #include <luajit.h>
@@ -195,6 +197,15 @@ int LuaThread::PackageLoader(const std::string& pkg, lua_State* L)
 		m_globalState.set("_mq_internal_table", *m_mqTable);
 
 		std::string_view script("return _mq_internal_table");
+		luaL_loadbuffer(sv, script.data(), script.size(), pkg.c_str());
+		return 1;
+	}
+	else if (pkg == "mq.actors")
+	{
+		LuaActors::RegisterLua(sv);
+		m_globalState.set("_mq_internal_actors", LuaActors());
+
+		std::string_view script("return _mq_internal_actors");
 		luaL_loadbuffer(sv, script.data(), script.size(), pkg.c_str());
 		return 1;
 	}
@@ -381,6 +392,54 @@ LuaThread::RunResult LuaThread::Run()
 	}
 
 	return { static_cast<sol::thread_status>(m_coroutine->coroutine.status()), std::nullopt };
+}
+
+const sol::object LuaThread::CopyObject(sol::object object) const
+{
+	auto state = m_coroutine->thread.lua_state();
+	if (object.lua_state() == state)
+		return object;
+	
+	switch (object.get_type())
+	{
+	case sol::type::string:
+		return sol::make_object(state, object.as<std::string>());
+	case sol::type::number:
+		return sol::make_object(state, object.as<double>());
+	case sol::type::boolean:
+		return sol::make_object(state, object.as<bool>());
+	case sol::type::table:
+	{
+		auto new_table = sol::state_view(state).create_table();
+		for (const auto& [k, v] : object.as<sol::table>())
+		{
+			auto key = CopyObject(k);
+			if (key != sol::lua_nil)
+				new_table.set(key, CopyObject(v));
+		}
+
+		return new_table;
+	}
+	case sol::type::userdata:
+		// only put usertypes here that we want to be able to transfer
+		using namespace bindings;
+
+		if (object.is<lua_MQTypeVar>())
+			return sol::make_object(state, lua_MQTypeVar(object.as<lua_MQTypeVar>().EvaluateMember()));
+
+		if (object.is<lua_MQDataItem>())
+			return sol::make_object(state, object.as<lua_MQDataItem>().EvaluateSelf());
+
+		if (object.is<ImVec2>())
+			return sol::make_object(state, object.as<ImVec2>());
+
+		if (object.is<ImVec4>())
+			return sol::make_object(state, object.as<ImVec4>());
+
+		return sol::make_object(state, sol::lua_nil);
+	default:
+		return sol::make_object(state, sol::lua_nil);
+	}
 }
 
 std::string LuaThread::GetScriptPath(std::string_view script, const std::filesystem::path& luaDir)
