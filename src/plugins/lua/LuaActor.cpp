@@ -21,7 +21,7 @@
 
 namespace mq::lua {
 
-static ci_unordered::map<std::string_view, std::shared_ptr<LuaMailbox>> s_mailboxes;
+static ci_unordered::map<std::string_view, std::weak_ptr<LuaMailbox>> s_mailboxes;
 
 bool Exists(std::string_view name)
 {
@@ -39,7 +39,12 @@ std::unique_ptr<LuaActor> Get(std::string_view name)
 
 int LuaMailbox::Receive(std::string_view topic, sol::object payload)
 {
-	return m_mailbox["receive"](m_mailbox, topic, payload);
+	auto ptr = LuaThread::get_from(m_mailbox.lua_state());
+	sol::function func = sol::function(ptr->GetState(), sol::function(m_mailbox["receive"]));
+	if (ptr)
+		return func(m_mailbox, topic, ptr->CopyObject(payload));
+
+	return func(m_mailbox, topic, sol::lua_nil);
 }
 
 void LuaMailbox::AddResponse(int id, const std::shared_ptr<LuaResponse>& response)
@@ -52,7 +57,7 @@ sol::table LuaMailbox::Register(sol::this_state s)
 	auto ptr = LuaThread::get_from(s);
 	if (ptr && s_mailboxes.find(ptr->GetName()) == s_mailboxes.end())
 	{
-		auto mailbox_ptr = std::make_shared<LuaMailbox>(ptr->GetName(), ptr);
+		auto mailbox_ptr = std::make_shared<LuaMailbox>(ptr->GetName());
 
 		sol::state_view sv(s);
 
@@ -80,16 +85,28 @@ sol::table LuaMailbox::Register(sol::this_state s)
 			end
 		)");
 
+		sol::function add_callback = sv.script(R"(
+			return function(self, topic, callback)
+				if type(callback) == 'function' then
+					self.__callbacks[topic] = callback
+				end
+			end
+		)");
+
 		auto mailbox_table = sv.create_table_with(
+			"__mailbox", mailbox_ptr,
 			"__current_id", 0,
 			"__messages", sv.create_table(),
 			"__callbacks", sv.create_table(),
 			"receive", receive,
 			"process", process,
+			"add_callback", add_callback,
 			"messages_per_frame", 10 // can either configure this or just let it be the default here. The user can always change it in the script.
 		);
 
 		mailbox_ptr->m_mailbox = mailbox_table;
+		s_mailboxes[ptr->GetName()] = mailbox_ptr;
+
 		return mailbox_table;
 	}
 
@@ -98,28 +115,55 @@ sol::table LuaMailbox::Register(sol::this_state s)
 
 void LuaMailbox::Process()
 {
-	for (const auto& [_, mailbox] : s_mailboxes)
+	for (const auto& [_, ptr] : s_mailboxes)
 	{
-		for (int m_num = 0; m_num < mailbox->m_mailbox.get<int>("messages_per_frame") && mailbox->m_mailbox.size() > 0; ++m_num)
+		auto mailbox = ptr.lock();
+		if (mailbox)
 		{
-			int id;
-			sol::object val;
-			sol::tie(id, val) = mailbox->m_mailbox["process"](mailbox->m_mailbox);
-			auto it = mailbox->m_responses.find(id);
-			if (it != mailbox->m_responses.end())
+			auto ptr = LuaThread::get_from(mailbox->m_mailbox.lua_state());
+			if (ptr)
 			{
-				auto response = it->second.lock();
-				if (response)
+				sol::function func = sol::function(ptr->GetState(), sol::function(mailbox->m_mailbox["process"]));
+				for (int m_num = 0; mailbox->m_mailbox.get<sol::table>("__messages").size() > 0 && m_num < mailbox->m_mailbox.get<int>("messages_per_frame"); ++m_num)
 				{
-					response->m_received = true;
-					response->m_value = val;
+					auto result = func(mailbox->m_mailbox);
+
+					int id;
+					sol::object val;
+
+					if (result.return_count() == 1)
+					{
+						id = result;
+						val = sol::make_object(ptr->GetState(), sol::lua_nil);
+					}
+					else if (result.return_count() > 1)
+					{
+						sol::tie(id, val) = result;
+					}
+
+					auto it = mailbox->m_responses.find(id);
+					if (it != mailbox->m_responses.end())
+					{
+						auto response = it->second.lock();
+						if (response)
+						{
+							auto target_ptr = LuaThread::get_from(response->m_targetState);
+							if (target_ptr)
+							{
+								response->m_received = true;
+								response->m_value = target_ptr->CopyObject(val);
+							}
+						}
+
+						mailbox->m_responses.erase(id);
+					}
 				}
 			}
 		}
 	}
 }
 
-void LuaActor::Tell(std::string_view topic, sol::object payload)
+void LuaActor::Tell(std::string_view topic, sol::object payload, sol::this_state s)
 {
 	auto mailbox = m_target.lock();
 	if (mailbox)
@@ -128,23 +172,22 @@ void LuaActor::Tell(std::string_view topic, sol::object payload)
 	}
 }
 
-std::shared_ptr<LuaResponse> LuaActor::Ask(std::string_view topic, sol::object payload)
+std::shared_ptr<LuaResponse> LuaActor::Ask(std::string_view topic, sol::object payload, sol::this_state s)
 {
 	auto mailbox = m_target.lock();
 	if (mailbox)
 	{
-		auto ptr = std::make_shared<LuaResponse>();
+		auto ptr = std::make_shared<LuaResponse>(LuaResponse{ false, sol::lua_nil, s });
 		mailbox->AddResponse(mailbox->Receive(topic, payload), ptr);
 		return ptr;
 	}
 
 	// no mailbox, response will be nil
-	return std::make_shared<LuaResponse>(LuaResponse{ true, sol::lua_nil });
+	return std::make_shared<LuaResponse>(LuaResponse{ true, sol::lua_nil, s });
 }
 
-LuaMailbox::LuaMailbox(std::string_view name, std::shared_ptr<LuaThread> thread)
+LuaMailbox::LuaMailbox(std::string_view name)
 	: m_name(name)
-	, m_thread(thread)
 {}
 
 LuaMailbox::~LuaMailbox()
@@ -186,6 +229,9 @@ void LuaActors::RegisterLua(sol::state_view sv)
 		"actor", sol::no_constructor,
 		"tell" , &LuaActor::Tell,
 		"ask"  , &LuaActor::Ask);
+
+	sv.new_usertype<LuaMailbox>(
+		"mailbox", sol::no_constructor);
 
 	sv.new_usertype<LuaActors>(
 		"actors"                 , sol::no_constructor,

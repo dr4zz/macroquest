@@ -21,12 +21,13 @@ struct LuaResponse
 {
 	bool m_received = false;
 	sol::object m_value = sol::lua_nil;
+	sol::state_view m_targetState;
 };
 
 class LuaMailbox
 {
 public:
-	LuaMailbox(std::string_view name, std::shared_ptr<LuaThread> thread);
+	LuaMailbox(std::string_view name);
 	~LuaMailbox();
 
 	int Receive(std::string_view topic, sol::object payload);
@@ -35,7 +36,6 @@ public:
 	static void Process();
 
 private:
-	std::weak_ptr<LuaThread> m_thread;
 	std::string_view m_name;
 	sol::table m_mailbox;
 	std::unordered_map<int, std::weak_ptr<LuaResponse>> m_responses;
@@ -45,8 +45,8 @@ class LuaActor
 {
 public:
 	LuaActor(std::string_view name, std::weak_ptr<LuaMailbox> target) : m_name(name), m_target(target) {}
-	void Tell(std::string_view topic, sol::object payload);
-	std::shared_ptr<LuaResponse> Ask(std::string_view topic, sol::object payload);
+	void Tell(std::string_view topic, sol::object payload, sol::this_state s);
+	std::shared_ptr<LuaResponse> Ask(std::string_view topic, sol::object payload, sol::this_state s);
 
 private:
 	std::string m_name;
