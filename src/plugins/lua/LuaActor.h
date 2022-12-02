@@ -30,7 +30,7 @@ public:
 	LuaMailbox(std::string_view name);
 	~LuaMailbox();
 
-	int Receive(std::string_view topic, sol::object payload);
+	int Receive(sol::object header, sol::object payload);
 	void AddResponse(int id, const std::shared_ptr<LuaResponse>& response);
 	static sol::table Register(sol::this_state s);
 	static void Process();
@@ -45,8 +45,8 @@ class LuaActor
 {
 public:
 	LuaActor(std::string_view name, std::weak_ptr<LuaMailbox> target) : m_name(name), m_target(target) {}
-	void Tell(std::string_view topic, sol::object payload, sol::this_state s);
-	std::shared_ptr<LuaResponse> Ask(std::string_view topic, sol::object payload, sol::this_state s);
+	void Tell(sol::object header, sol::object payload, sol::this_state s);
+	std::shared_ptr<LuaResponse> Ask(sol::object header, sol::object payload, sol::this_state s);
 
 private:
 	std::string m_name;

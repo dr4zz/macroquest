@@ -37,14 +37,17 @@ std::unique_ptr<LuaActor> Get(std::string_view name)
 	return {};
 }
 
-int LuaMailbox::Receive(std::string_view topic, sol::object payload)
+int LuaMailbox::Receive(sol::object header, sol::object payload)
 {
 	auto ptr = LuaThread::get_from(m_mailbox.lua_state());
-	sol::function func = sol::function(ptr->GetState(), sol::function(m_mailbox["receive"]));
 	if (ptr)
-		return func(m_mailbox, topic, ptr->CopyObject(payload));
+	{
+		sol::function func = sol::function(ptr->GetState(), sol::function(m_mailbox["receive"]));
+		return func(m_mailbox, ptr->CopyObject(header), ptr->CopyObject(payload));
+	}
 
-	return func(m_mailbox, topic, sol::lua_nil);
+	// no lua state, it doesn't make sense to call the receive function
+	return -1;
 }
 
 void LuaMailbox::AddResponse(int id, const std::shared_ptr<LuaResponse>& response)
@@ -62,7 +65,7 @@ sol::table LuaMailbox::Register(sol::this_state s)
 		sol::state_view sv(s);
 
 		sol::function receive = sv.script(R"(
-			return function(self, topic, payload)
+			return function(self, header, payload)
 				-- 1 trillion messages before wrap seems quite safe
 				if self.__current_id == 1000000000000 then
 					self.__current_id = 1
@@ -70,7 +73,7 @@ sol::table LuaMailbox::Register(sol::this_state s)
 					self.__current_id = self.__current_id + 1
 				end
 				-- insert at the front
-				table.insert(self.__messages, 1, { ['id'] = self.__current_id, ['topic'] = topic, ['payload'] = payload })
+				table.insert(self.__messages, 1, { ['id'] = self.__current_id, ['header'] = header, ['payload'] = payload })
 				return self.__current_id
 			end
 		)");
@@ -78,17 +81,17 @@ sol::table LuaMailbox::Register(sol::this_state s)
 		sol::function process = sv.script(R"(
 			return function(self)
 				local message = table.remove(self.__messages)
-				if self.__callbacks[message.topic] then
-					return message.id, self.__callbacks[message.topic](message.payload)
+				if self.__callbacks[message.header] then
+					return message.id, self.__callbacks[message.header](message.payload)
 				end
 				return message.id, nil
 			end
 		)");
 
 		sol::function add_callback = sv.script(R"(
-			return function(self, topic, callback)
+			return function(self, header, callback)
 				if type(callback) == 'function' then
-					self.__callbacks[topic] = callback
+					self.__callbacks[header] = callback
 				end
 			end
 		)");
@@ -163,22 +166,22 @@ void LuaMailbox::Process()
 	}
 }
 
-void LuaActor::Tell(std::string_view topic, sol::object payload, sol::this_state s)
+void LuaActor::Tell(sol::object header, sol::object payload, sol::this_state s)
 {
 	auto mailbox = m_target.lock();
 	if (mailbox)
 	{
-		mailbox->Receive(topic, payload);
+		mailbox->Receive(header, payload);
 	}
 }
 
-std::shared_ptr<LuaResponse> LuaActor::Ask(std::string_view topic, sol::object payload, sol::this_state s)
+std::shared_ptr<LuaResponse> LuaActor::Ask(sol::object header, sol::object payload, sol::this_state s)
 {
 	auto mailbox = m_target.lock();
 	if (mailbox)
 	{
 		auto ptr = std::make_shared<LuaResponse>(LuaResponse{ false, sol::lua_nil, s });
-		mailbox->AddResponse(mailbox->Receive(topic, payload), ptr);
+		mailbox->AddResponse(mailbox->Receive(header, payload), ptr);
 		return ptr;
 	}
 
@@ -205,7 +208,8 @@ sol::object StatelessIterator(sol::object, sol::object k, sol::this_state s)
 
 	if (k.is<std::string_view>())
 	{
-		auto it = std::next(s_mailboxes.find(k.as<std::string_view>()));
+		auto it = s_mailboxes.find(k.as<std::string_view>());
+		if (it != s_mailboxes.end()) it = std::next(it);
 		if (it != s_mailboxes.end())
 			return sol::make_object(s, it->first);
 	}
