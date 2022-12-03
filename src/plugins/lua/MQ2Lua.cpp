@@ -19,7 +19,6 @@
 #include "LuaThread.h"
 #include "LuaEvent.h"
 #include "LuaImGui.h"
-#include "LuaActor.h"
 #include "imgui/ImGuiUtils.h"
 
 #include "imgui/ImGuiFileDialog.h"
@@ -1598,8 +1597,6 @@ PLUGIN_API void ShutdownPlugin()
 PLUGIN_API void OnPulse()
 {
 	using namespace mq::lua;
-
-	LuaMailbox::Process();
 
 	if (!s_pending.empty())
 	{

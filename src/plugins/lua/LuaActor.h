@@ -22,6 +22,12 @@ struct LuaResponse
 	bool m_received = false;
 	sol::object m_value = sol::lua_nil;
 	sol::state_view m_targetState;
+
+	bool GetReceived() { return m_received; }
+	void SetReceived(bool received) { m_received = received; }
+
+	sol::object GetValue(sol::this_state s);
+	void SetValue(sol::object value) { m_value = value; }
 };
 
 class LuaMailbox
@@ -30,13 +36,13 @@ public:
 	LuaMailbox(std::string_view name);
 	~LuaMailbox();
 
-	int Receive(sol::object header, sol::object payload);
+	int Send(sol::object header, sol::object payload);
 	void AddResponse(int id, const std::shared_ptr<LuaResponse>& response);
 	static sol::table Register(sol::this_state s);
 	static void Process();
 
 private:
-	std::string_view m_name;
+	std::string m_name;
 	sol::table m_mailbox;
 	std::unordered_map<int, std::weak_ptr<LuaResponse>> m_responses;
 };

@@ -23,6 +23,25 @@ namespace mq::lua {
 
 static ci_unordered::map<std::string_view, std::weak_ptr<LuaMailbox>> s_mailboxes;
 
+sol::object LuaResponse::GetValue(sol::this_state s)
+{
+	auto ptr = LuaThread::get_from(s);
+	if (ptr)
+		return ptr->CopyObject(m_value);
+
+	return sol::lua_nil;
+}
+
+void SetResponse(std::weak_ptr<LuaResponse> response, sol::object value)
+{
+	auto ptr = response.lock();
+	if (ptr)
+	{
+		ptr->SetReceived(true);
+		ptr->SetValue(value);
+	}
+}
+
 bool Exists(std::string_view name)
 {
 	return s_mailboxes.find(name) != s_mailboxes.end();
@@ -37,22 +56,23 @@ std::unique_ptr<LuaActor> Get(std::string_view name)
 	return {};
 }
 
-int LuaMailbox::Receive(sol::object header, sol::object payload)
+int LuaMailbox::Send(sol::object header, sol::object payload)
 {
 	auto ptr = LuaThread::get_from(m_mailbox.lua_state());
 	if (ptr)
 	{
-		sol::function func = sol::function(ptr->GetState(), sol::function(m_mailbox["receive"]));
+		sol::function func = sol::function(ptr->GetState(), sol::function(m_mailbox["__queue"]));
 		return func(m_mailbox, ptr->CopyObject(header), ptr->CopyObject(payload));
 	}
 
-	// no lua state, it doesn't make sense to call the receive function
+	// no lua state, it doesn't make sense to call the queue function
 	return -1;
 }
 
 void LuaMailbox::AddResponse(int id, const std::shared_ptr<LuaResponse>& response)
 {
-	m_responses[id] = response;
+	//m_responses[id] = response;
+	m_mailbox["__responses"][id] = std::weak_ptr<LuaResponse>(response);
 }
 
 sol::table LuaMailbox::Register(sol::this_state s)
@@ -64,7 +84,7 @@ sol::table LuaMailbox::Register(sol::this_state s)
 
 		sol::state_view sv(s);
 
-		sol::function receive = sv.script(R"(
+		sol::function queue = sv.script(R"(
 			return function(self, header, payload)
 				-- 1 trillion messages before wrap seems quite safe
 				if self.__current_id == 1000000000000 then
@@ -78,20 +98,25 @@ sol::table LuaMailbox::Register(sol::this_state s)
 			end
 		)");
 
-		sol::function process = sv.script(R"(
+		sol::function receive = sv.script(R"(
 			return function(self)
-				local message = table.remove(self.__messages)
-				if self.__callbacks[message.header] then
-					return message.id, self.__callbacks[message.header](message.payload)
-				end
-				return message.id, nil
+				-- just pop off the back of the messages queue (it's inserted from the front)
+				return table.remove(tbl.__messages)
 			end
 		)");
 
-		sol::function add_callback = sv.script(R"(
-			return function(self, header, callback)
-				if type(callback) == 'function' then
-					self.__callbacks[header] = callback
+		sol::function messages = sv.script(R"(
+			return function(self)
+				return self.receive, self
+			end
+		)");
+
+		sol::function respond = sv.script(R"(
+			return function(self, message, value)
+				local response = self.__responses[message.id]
+				if response then
+					self.__set_response(response, value)
+					self.__responses[message.id] = nil
 				end
 			end
 		)");
@@ -100,15 +125,16 @@ sol::table LuaMailbox::Register(sol::this_state s)
 			"__mailbox", mailbox_ptr,
 			"__current_id", 0,
 			"__messages", sv.create_table(),
-			"__callbacks", sv.create_table(),
+			"__responses", sv.create_table(),
+			"__queue", queue,
 			"receive", receive,
-			"process", process,
-			"add_callback", add_callback,
-			"messages_per_frame", 10 // can either configure this or just let it be the default here. The user can always change it in the script.
+			"messages", messages,
+			"respond", respond,
+			"__set_response", &SetResponse
 		);
 
 		mailbox_ptr->m_mailbox = mailbox_table;
-		s_mailboxes[ptr->GetName()] = mailbox_ptr;
+		s_mailboxes[mailbox_ptr->m_name] = mailbox_ptr;
 
 		return mailbox_table;
 	}
@@ -116,62 +142,12 @@ sol::table LuaMailbox::Register(sol::this_state s)
 	return sol::lua_nil;
 }
 
-void LuaMailbox::Process()
-{
-	for (const auto& [_, ptr] : s_mailboxes)
-	{
-		auto mailbox = ptr.lock();
-		if (mailbox)
-		{
-			auto ptr = LuaThread::get_from(mailbox->m_mailbox.lua_state());
-			if (ptr)
-			{
-				sol::function func = sol::function(ptr->GetState(), sol::function(mailbox->m_mailbox["process"]));
-				for (int m_num = 0; mailbox->m_mailbox.get<sol::table>("__messages").size() > 0 && m_num < mailbox->m_mailbox.get<int>("messages_per_frame"); ++m_num)
-				{
-					auto result = func(mailbox->m_mailbox);
-
-					int id;
-					sol::object val;
-
-					if (result.return_count() == 1)
-					{
-						id = result;
-						val = sol::make_object(ptr->GetState(), sol::lua_nil);
-					}
-					else if (result.return_count() > 1)
-					{
-						sol::tie(id, val) = result;
-					}
-
-					auto it = mailbox->m_responses.find(id);
-					if (it != mailbox->m_responses.end())
-					{
-						auto response = it->second.lock();
-						if (response)
-						{
-							auto target_ptr = LuaThread::get_from(response->m_targetState);
-							if (target_ptr)
-							{
-								response->m_received = true;
-								response->m_value = target_ptr->CopyObject(val);
-							}
-						}
-
-						mailbox->m_responses.erase(id);
-					}
-				}
-			}
-		}
-	}
-}
-
 void LuaActor::Tell(sol::object header, sol::object payload, sol::this_state s)
 {
 	auto mailbox = m_target.lock();
 	if (mailbox)
 	{
-		mailbox->Receive(header, payload);
+		mailbox->Send(header, payload);
 	}
 }
 
@@ -181,7 +157,7 @@ std::shared_ptr<LuaResponse> LuaActor::Ask(sol::object header, sol::object paylo
 	if (mailbox)
 	{
 		auto ptr = std::make_shared<LuaResponse>(LuaResponse{ false, sol::lua_nil, s });
-		mailbox->AddResponse(mailbox->Receive(header, payload), ptr);
+		mailbox->AddResponse(mailbox->Send(header, payload), ptr);
 		return ptr;
 	}
 
@@ -226,8 +202,8 @@ void LuaActors::RegisterLua(sol::state_view sv)
 {
 	sv.new_usertype<LuaResponse>(
 		"response" , sol::no_constructor,
-		"received" , sol::readonly(&LuaResponse::m_received),
-		"value"    , sol::readonly(&LuaResponse::m_value));
+		"received" , sol::property(&LuaResponse::GetReceived),
+		"value"    , sol::property(&LuaResponse::GetValue));
 
 	sv.new_usertype<LuaActor>(
 		"actor", sol::no_constructor,
